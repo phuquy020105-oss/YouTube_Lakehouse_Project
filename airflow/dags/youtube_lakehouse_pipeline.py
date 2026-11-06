@@ -1,5 +1,7 @@
 
 import os
+import ntpath
+import posixpath
 from datetime import timedelta
 
 import pendulum
@@ -13,7 +15,7 @@ from docker.types import Mount
 # 1. PROJECT CONFIGURATION
 # =====================================================
 
-PROJECT_ROOT = r"D:\YouTube_Lakehouse"
+PROJECT_ROOT = os.environ["PROJECT_ROOT"]
 
 SPARK_IMAGE = "youtube-lakehouse-spark:3.5.3"
 
@@ -23,8 +25,32 @@ DOCKER_NETWORK = "youtube_lakehouse_default"
 
 
 # =====================================================
-# 2. MINIO ENVIRONMENT
-# Read directly from Airflow Scheduler environment
+# 2. PORTABLE HOST PATH
+# WINDOWS / MACOS / LINUX
+# =====================================================
+
+
+def get_host_path(directory):
+
+    # Windows
+    if len(PROJECT_ROOT) >= 2 and PROJECT_ROOT[1] == ":":
+        return ntpath.join(
+            ntpath.normpath(PROJECT_ROOT),
+            directory
+        )
+
+    # macOS / Linux
+    return posixpath.normpath(
+        posixpath.join(PROJECT_ROOT, directory)
+    )
+
+SRC_PATH = get_host_path("src")
+
+DATA_PATH = get_host_path("data")
+
+
+# =====================================================
+# 3. MINIO ENVIRONMENT
 # =====================================================
 
 MINIO_ENV = {
@@ -35,7 +61,7 @@ MINIO_ENV = {
 
 
 # =====================================================
-# 3. DOCKER OPERATOR FACTORY
+# 4. DOCKER OPERATOR FACTORY
 # =====================================================
 
 def create_spark_task(
@@ -46,22 +72,25 @@ def create_spark_task(
 ):
 
     mounts = [
+
         Mount(
-            source=PROJECT_ROOT + r"\src",
+            source=SRC_PATH,
             target="/opt/project/src",
             type="bind",
             read_only=True
         ),
 
         Mount(
-            source=PROJECT_ROOT + r"\data",
+            source=DATA_PATH,
             target="/opt/project/data",
             type="bind",
             read_only=data_read_only
         )
+
     ]
 
     return DockerOperator(
+
         task_id=task_id,
 
         image=SPARK_IMAGE,
@@ -92,14 +121,16 @@ def create_spark_task(
         execution_timeout=timedelta(
             seconds=timeout
         )
+
     )
 
 
 # =====================================================
-# 4. DEFAULT ARGUMENTS
+# 5. DEFAULT ARGUMENTS
 # =====================================================
 
 default_args = {
+
     "owner": "youtube-lakehouse",
 
     "depends_on_past": False,
@@ -107,11 +138,12 @@ default_args = {
     "retries": 1,
 
     "retry_delay": timedelta(minutes=3),
+
 }
 
 
 # =====================================================
-# 5. DAG DEFINITION
+# 6. DAG DEFINITION
 # =====================================================
 
 with DAG(
@@ -129,7 +161,6 @@ with DAG(
         2026, 1, 1, tz="UTC"
     ),
 
-    # Manual execution during testing
     schedule=None,
 
     catchup=False,
@@ -148,10 +179,11 @@ with DAG(
 ) as dag:
 
     # =================================================
-    # 6. BRONZE CSV
+    # 7. BRONZE CSV
     # =================================================
 
     bronze_csv = create_spark_task(
+
         task_id="bronze_csv_ingestion",
 
         script="ingestion/batch/csv_to_bronze.py",
@@ -159,13 +191,15 @@ with DAG(
         data_read_only=True,
 
         timeout=3600
+
     )
 
     # =================================================
-    # 7. SILVER CSV
+    # 8. SILVER CSV
     # =================================================
 
     silver_csv = create_spark_task(
+
         task_id="silver_csv_processing",
 
         script="lakehouse/silver/build_silver_csv.py",
@@ -173,13 +207,15 @@ with DAG(
         data_read_only=True,
 
         timeout=3600
+
     )
 
     # =================================================
-    # 8. GOLD STAR SCHEMA
+    # 9. GOLD STAR SCHEMA
     # =================================================
 
     gold = create_spark_task(
+
         task_id="gold_star_schema",
 
         script="lakehouse/gold/build_gold.py",
@@ -187,28 +223,31 @@ with DAG(
         data_read_only=True,
 
         timeout=3600
+
     )
 
     # =================================================
-    # 9. BRONZE CDC
+    # 10. BRONZE CDC
     # =================================================
 
     bronze_cdc = create_spark_task(
+
         task_id="bronze_cdc_ingestion",
 
         script="ingestion/streaming/kafka_to_bronze.py",
 
-        # Checkpoint needs write access
         data_read_only=False,
 
         timeout=3600
+
     )
 
     # =================================================
-    # 10. SILVER CDC
+    # 11. SILVER CDC
     # =================================================
 
     silver_cdc = create_spark_task(
+
         task_id="silver_cdc_processing",
 
         script="lakehouse/silver/silver_cdc.py",
@@ -216,14 +255,13 @@ with DAG(
         data_read_only=True,
 
         timeout=3600
+
     )
 
     # =================================================
-    # 11. TASK DEPENDENCIES
+    # 12. TASK DEPENDENCIES
     # =================================================
 
-    # CSV pipeline
     bronze_csv >> silver_csv >> gold
 
-    # CDC pipeline
     bronze_cdc >> silver_cdc
