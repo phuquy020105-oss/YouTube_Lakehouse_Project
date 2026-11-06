@@ -1,0 +1,331 @@
+
+services:
+
+  # ===================================================
+  # 1. POSTGRESQL - CDC ENABLED
+  # ===================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: youtube-postgres
+    restart: unless-stopped
+
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init:/docker-entrypoint-initdb.d:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ===================================================
+  # 2. SILO OBJECT STORAGE
+  # ===================================================
+  minio:
+    image: pgsty/silo:RELEASE.2026-10-26T00-00-00Z
+    container_name: youtube-minio
+    hostname: minio
+    restart: unless-stopped
+
+    command: server /data --console-address ":9001"
+
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT}:9001"
+
+    volumes:
+      - minio_data:/data
+
+  # ===================================================
+  # 3. MINIO BUCKET INITIALIZATION
+  # ===================================================
+  minio-init:
+    image: youtube-lakehouse-spark:3.5.3
+    container_name: youtube-minio-init
+    restart: "no"
+
+    entrypoint: ["python"]
+    command:
+      - /opt/project/scripts/init/02-create-minio-bucket.py
+
+    environment:
+      MINIO_ENDPOINT_URL: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+
+    volumes:
+      - ./scripts/init:/opt/project/scripts/init:ro
+
+    depends_on:
+      minio:
+        condition: service_started
+
+  # ===================================================
+  # 4. HIVE METASTORE
+  # ===================================================
+  hive-metastore:
+    image: apache/hive:standalone-metastore-4.1.0
+    container_name: youtube-hive-metastore
+    hostname: hive-metastore
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      DB_DRIVER: postgres
+      SERVICE_NAME: metastore
+      HIVE_CUSTOM_CONF_DIR: /hive_custom_conf
+
+      SERVICE_OPTS: >-
+        -Xmx1G
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/hive_metastore
+        -Djavax.jdo.option.ConnectionUserName=${HIVE_DB_USER}
+        -Djavax.jdo.option.ConnectionPassword=${HIVE_DB_PASSWORD}
+
+    ports:
+      - "127.0.0.1:${HIVE_METASTORE_PORT}:9083"
+
+    volumes:
+      - ./config/hive:/hive_custom_conf:ro
+      - ./config/hive/lib/postgresql-42.7.5.jar:/opt/hive/lib/postgres.jar:ro
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "bash -c 'echo > /dev/tcp/127.0.0.1/9083'"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  # ===================================================
+  # 5. APACHE KAFKA - KRAFT MODE
+  # ===================================================
+  kafka:
+    image: apache/kafka:4.1.2
+    container_name: youtube-kafka
+    hostname: kafka
+    restart: unless-stopped
+
+    environment:
+      KAFKA_NODE_ID: ${KAFKA_BROKER_ID}
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+
+    ports:
+      - "127.0.0.1:${KAFKA_PORT}:9092"
+
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ===================================================
+  # 6. KAFKA CONNECT + DEBEZIUM
+  # ===================================================
+  connect:
+    image: quay.io/debezium/connect:3.7
+    container_name: youtube-debezium-connect
+    hostname: connect
+    restart: unless-stopped
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: ${CONNECT_GROUP_ID}
+
+      CONFIG_STORAGE_TOPIC: ${CONNECT_CONFIG_TOPIC}
+      OFFSET_STORAGE_TOPIC: ${CONNECT_OFFSET_TOPIC}
+      STATUS_STORAGE_TOPIC: ${CONNECT_STATUS_TOPIC}
+
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+
+      ENABLE_DEBEZIUM_SCRIPTING: "false"
+      HEAP_OPTS: "-Xms256M -Xmx768M"
+
+      CONNECT_CONFIG_PROVIDERS: file
+      CONNECT_CONFIG_PROVIDERS_FILE_CLASS: org.apache.kafka.common.config.provider.FileConfigProvider
+      CONNECT_CONFIG_PROVIDERS_FILE_PARAM_ALLOWED_PATHS: /run/secrets/debezium.properties
+
+    ports:
+      - "127.0.0.1:${CONNECT_PORT}:8083"
+
+    volumes:
+      - ./config/debezium/debezium.properties:/run/secrets/debezium.properties:ro
+
+  # ===================================================
+  # 7. AIRFLOW COMMON CONFIGURATION
+  # ===================================================
+  x-airflow-common: &airflow-common
+    image: youtube-lakehouse-airflow:2.10.5
+    restart: unless-stopped
+
+    environment: &airflow-common-env
+      AIRFLOW__CORE__EXECUTOR: ${AIRFLOW_EXECUTOR}
+
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_FERNET_KEY}
+
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+      AIRFLOW_UID: ${AIRFLOW_UID}
+
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ===================================================
+  # 8. AIRFLOW INITIALIZATION
+  # ===================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: youtube-airflow-init
+    restart: "no"
+    user: "0:0"
+
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins
+        chown -R ${AIRFLOW_UID}:0 /opt/airflow/dags /opt/airflow/logs /opt/airflow/plugins
+        airflow db migrate
+        if ! airflow users list | grep -q "${AIRFLOW_ADMIN_USER}"; then
+          airflow users create \
+            --username "${AIRFLOW_ADMIN_USER}" \
+            --password "${AIRFLOW_ADMIN_PASSWORD}" \
+            --firstname Admin \
+            --lastname Lakehouse \
+            --role Admin \
+            --email admin@example.com
+        fi
+
+  # ===================================================
+  # 9. AIRFLOW WEBSERVER
+  # ===================================================
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: youtube-airflow-webserver
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    command: webserver
+
+    ports:
+      - "127.0.0.1:${AIRFLOW_WEBSERVER_PORT}:8080"
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl --fail http://localhost:8080/health"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ===================================================
+  # 10. AIRFLOW SCHEDULER
+  # ===================================================
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: youtube-airflow-scheduler
+
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+    command: scheduler
+
+# ===================================================
+# PERSISTENT VOLUMES
+# ===================================================
+volumes:
+
+  postgres_data:
+    name: youtube_lakehouse_postgres_data
+
+  minio_data:
+    name: youtube_lakehouse_minio_data
+
+  kafka_data:
+    name: youtube_lakehouse_kafka_data

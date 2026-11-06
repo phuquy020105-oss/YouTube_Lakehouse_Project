@@ -1,0 +1,29 @@
+
+{
+  "name": "youtube-postgres-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "${file:/run/secrets/debezium.properties:database.user}",
+    "database.password": "${file:/run/secrets/debezium.properties:database.password}",
+    "database.dbname": "youtube_db",
+
+    "topic.prefix": "youtube",
+
+    "plugin.name": "pgoutput",
+    "slot.name": "youtube_cdc_slot",
+    "publication.name": "dbz_publication",
+    "publication.autocreate.mode": "disabled",
+
+    "table.include.list": "public.youtube_cdc_test",
+
+    "snapshot.mode": "initial",
+    "include.schema.changes": "false",
+
+    "decimal.handling.mode": "string",
+    "tombstones.on.delete": "true"
+  }
+}

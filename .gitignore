@@ -1,0 +1,54 @@
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Debezium credentials
+config/debezium/debezium.properties
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Airflow runtime
+airflow/logs/
+airflow/plugins/__pycache__/
+
+# Logs
+logs/
+*.log
+
+# Checkpoints and temporary data
+data/checkpoints/
+data/processed/
+data/tmp/
+spark-warehouse/
+metastore_db/
+
+# Credentials and certificates
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+
+# IDE
+.vscode/
+.idea/
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.old

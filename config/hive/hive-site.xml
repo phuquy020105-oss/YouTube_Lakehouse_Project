@@ -1,0 +1,34 @@
+
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!-- ====================================== -->
+    <!-- HIVE METASTORE CONFIGURATION           -->
+    <!-- ====================================== -->
+
+    <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>s3a://youtube-lakehouse/warehouse/</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>true</value>
+    </property>
+
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>false</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.thrift.port</name>
+        <value>9083</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.schema.info.class</name>
+        <value>org.apache.hadoop.hive.metastore.MetaStoreSchemaInfo</value>
+    </property>
+
+</configuration>
